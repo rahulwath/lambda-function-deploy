@@ -1,0 +1,169 @@
+stages:
+  - package-build
+  - terraform-validate
+  - terraform-plan
+  - terraform-apply
+  - terraform-destroy
+
+lambda package import:
+  image: python:3.8-slim
+  stage: package-build
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - cache_modules/
+  before_script:
+    - apt-get update -y
+    - apt-get install zip git wget unzip -y
+  script:
+    - cd source-code
+    - zip -r $CI_PIPELINE_ID.zip *
+    - cd -
+    - mkdir artifacts
+    - mv source-code/$CI_PIPELINE_ID.zip artifacts/
+  allow_failure: false
+  artifacts:
+    paths:
+      - artifacts/*
+    expire_in: 1 week
+  only:
+    - tags
+
+terraform validate:
+  image:
+    name: registry.gitlab.com/gitlab-org/terraform-images/releases/1.3:latest
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  stage: terraform-validate
+  dependencies:
+    - lambda package import
+  variables:
+    PLAN: plan.tfplan
+    JSON_PLAN_FILE: tfplan.json
+    STATE: dbrest.tfstate
+  cache:
+    paths:
+      - .terraform
+  before_script:
+    - apk add --no-cache jq tree
+    - alias convert_report="jq -r '([.resource_changes[]?.change.actions?]|flatten)|{\"create\":(map(select(.==\"create\"))|length),\"update\":(map(select(.==\"update\"))|length),\"delete\":(map(select(.==\"delete\"))|length)}'"
+    - cd terraform
+    - terraform --version
+    - cp -R ../artifacts/* ./
+    - ls modules/
+    - pwd
+    - terraform init -backend-config=address=${TF_ADDRESS} -backend-config=username=${TF_USERNAME} -backend-config=password=${TF_PASSWORD} -backend-config=retry_wait_min=5
+  script:
+    - sed -i 's/<PAYLOAD_FILE>/'${CI_PIPELINE_ID}'/g' global_vars.tf
+    - terraform validate
+    - tree -f
+  allow_failure: false
+  artifacts:
+    paths:
+      - artifacts/*
+    expire_in: 1 week
+  needs: ['lambda package import']
+  only:
+    - tags
+
+terraform plan:
+  image:
+    name: registry.gitlab.com/gitlab-org/terraform-images/releases/1.3:latest
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  stage: terraform-plan
+  dependencies:
+    - terraform validate
+  variables:
+    PLAN: plan.tfplan
+    JSON_PLAN_FILE: tfplan.json
+    STATE: dbrest.tfstate
+  cache:
+    paths:
+      - .terraform
+  before_script:
+    - alias convert_report="jq -r '([.resource_changes[]?.change.actions?]|flatten)|{\"create\":(map(select(.==\"create\"))|length),\"update\":(map(select(.==\"update\"))|length),\"delete\":(map(select(.==\"delete\"))|length)}'"
+    - cd terraform
+    - terraform --version
+    - cp -R ../artifacts/* ./
+    - terraform init -backend-config=address=${TF_ADDRESS} -backend-config=username=${TF_USERNAME} -backend-config=password=${TF_PASSWORD} -backend-config=retry_wait_min=5
+  script:
+    - sed -i 's/<PAYLOAD_FILE>/'${CI_PIPELINE_ID}'/g' global_vars.tf
+    - terraform plan -out=plan_file
+    - terraform show --json plan_file > plan.json
+  artifacts:
+    paths:
+      - artifacts/*
+    expire_in: 1 week
+  allow_failure: false
+  needs: ['terraform validate']
+  only:
+    - tags
+
+terraform apply:
+  image:
+    name: registry.gitlab.com/gitlab-org/terraform-images/releases/1.3:latest
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  stage: terraform-apply
+  dependencies:
+    - terraform plan
+  variables:
+    PLAN: plan.tfplan
+    JSON_PLAN_FILE: tfplan.json
+    STATE: dbrest.tfstate
+  cache:
+    paths:
+      - .terraform
+  before_script:
+    - alias convert_report="jq -r '([.resource_changes[]?.change.actions?]|flatten)|{\"create\":(map(select(.==\"create\"))|length),\"update\":(map(select(.==\"update\"))|length),\"delete\":(map(select(.==\"delete\"))|length)}'"
+    - cd terraform
+    - terraform --version
+    - cp -R ../artifacts/* ./
+    - terraform init -backend-config=address=${TF_ADDRESS} -backend-config=username=${TF_USERNAME} -backend-config=password=${TF_PASSWORD} -backend-config=retry_wait_min=5
+  script:
+    - sed -i 's/<PAYLOAD_FILE>/'${CI_PIPELINE_ID}'/g' global_vars.tf
+    - terraform apply --auto-approve
+  when: manual 
+  allow_failure: false
+  artifacts:
+    paths:
+      - artifacts/*
+    expire_in: 1 week
+  needs: ['terraform plan']
+  retry: 2
+  only:
+    - tags
+
+terraform destroy:
+  image:
+    name: registry.gitlab.com/gitlab-org/terraform-images/releases/1.3:latest
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  stage: terraform-destroy
+  dependencies:
+    - terraform apply
+  variables:
+    PLAN: plan.tfplan
+    JSON_PLAN_FILE: tfplan.json
+    STATE: dbrest.tfstate
+  cache:
+    paths:
+      - .terraform
+  before_script:
+    - alias convert_report="jq -r '([.resource_changes[]?.change.actions?]|flatten)|{\"create\":(map(select(.==\"create\"))|length),\"update\":(map(select(.==\"update\"))|length),\"delete\":(map(select(.==\"delete\"))|length)}'"
+    - cd terraform
+    - terraform --version
+    - cp -R ../artifacts/* ./
+    - terraform init -backend-config=address=${TF_ADDRESS} -backend-config=username=${TF_USERNAME} -backend-config=password=${TF_PASSWORD} -backend-config=retry_wait_min=5
+  script:
+    - terraform destroy --auto-approve
+  when: manual 
+  allow_failure: false
+  needs: ['terraform apply']
+  only:
+    - tags
